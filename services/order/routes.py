@@ -57,6 +57,7 @@ async def create_order(
     body: CreateOrderRequest,
     user: dict = Depends(get_current_user),
     x_payment_simulate: Optional[str] = Header(None),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     """Create a new order.
 
@@ -69,6 +70,21 @@ async def create_order(
     """
     pool = request.app.state.db_pool
     user_id = uuid.UUID(user["user_id"])
+
+    # ── API Idempotency Check ────
+    if idempotency_key:
+        async with pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                "SELECT id, status FROM orders WHERE idempotency_key = $1 AND user_id = $2",
+                idempotency_key, user_id
+            )
+            if existing:
+                return {
+                    "id": str(existing["id"]),
+                    "status": existing["status"],
+                    "message": "Order already accepted (Idempotent response)"
+                }
+
     order_id = uuid.uuid4()
 
     # Calculate total from submitted items
@@ -100,8 +116,8 @@ async def create_order(
         async with conn.transaction():
             await conn.execute(
                 """
-                INSERT INTO orders (id, user_id, restaurant_id, items, total_amount, status, payment_simulate)
-                VALUES ($1, $2, $3, $4, $5, 'PENDING', $6)
+                INSERT INTO orders (id, user_id, restaurant_id, items, total_amount, status, payment_simulate, idempotency_key)
+                VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7)
                 """,
                 order_id,
                 user_id,
@@ -109,6 +125,7 @@ async def create_order(
                 items_data,
                 total_amount,
                 x_payment_simulate,
+                idempotency_key,
             )
             await conn.execute(
                 """
