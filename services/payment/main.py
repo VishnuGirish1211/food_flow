@@ -18,6 +18,7 @@ from shared.outbox import run_outbox_relay
 import db
 import routes
 from consumers import run_consumer
+from reconciliation import run_reconciliation_worker
 
 setup_logging("payment-service")
 
@@ -35,11 +36,14 @@ async def lifespan(app: FastAPI):
     outbox_task = asyncio.create_task(
         run_outbox_relay(app.state.db_pool, app.state.producer, shutdown_event)
     )
+    reconciliation_task = asyncio.create_task(
+        run_reconciliation_worker(app.state.db_pool, shutdown_event)
+    )
 
     yield
 
     shutdown_event.set()
-    await asyncio.gather(consumer_task, outbox_task, return_exceptions=True)
+    await asyncio.gather(consumer_task, outbox_task, reconciliation_task, return_exceptions=True)
     await app.state.producer.stop()
     await app.state.db_pool.close()
 
