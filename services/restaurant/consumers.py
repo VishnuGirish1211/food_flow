@@ -73,8 +73,19 @@ async def _handle_message(db_pool: Pool, envelope: dict):
 
                 if event_type == "order.placed":
                     try:
-                        # Attempt to reserve stock
-                        await reserve_stock(conn, order_id, payload["items"])
+                        # Attempt to reserve stock inside a SAVEPOINT (a nested
+                        # asyncpg transaction). If any item is short, the error
+                        # escapes this block, the savepoint rolls back, and the
+                        # deductions already made for earlier items are undone —
+                        # while the outer transaction stays alive to record the
+                        # rejection below.
+                        #
+                        # The `except` MUST stay outside this block. Catching
+                        # InsufficientStockError inside it would swallow the error
+                        # before the context manager sees it, so nothing would roll
+                        # back and partial deductions would commit.
+                        async with conn.transaction():
+                            await reserve_stock(conn, order_id, payload["items"])
 
                         # Reservation succeeded, publish stock.reserved
                         outbox_event = wrap_event("stock.reserved", payload)
