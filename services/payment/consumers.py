@@ -79,15 +79,18 @@ async def _handle_message(db_pool: Pool, envelope: dict):
                     logger.info("duplicate_event_skipped", event_id=str(event_id))
                     return
 
-                # Record intent to process
+                # Record intent to process. The simulate directive is persisted
+                # so reconciliation can reproduce the outcome if we crash before
+                # Transaction 2.
                 payment_id = await conn.fetchval(
                     """
-                    INSERT INTO payments (order_id, amount, status)
-                    VALUES ($1, $2, 'PROCESSING')
+                    INSERT INTO payments (order_id, amount, status, payment_simulate)
+                    VALUES ($1, $2, 'PROCESSING', $3)
                     RETURNING id
                     """,
                     uuid.UUID(order_id),
                     amount,
+                    simulate_directive,
                 )
 
                 # Mark as processed immediately so we don't retry if the gateway crashes

@@ -72,21 +72,56 @@ async def test_reconcile_stuck_payment_success():
     payment_id = str(uuid.uuid4())
     order_id = str(uuid.uuid4())
     payments = [
-        {"id": payment_id, "order_id": order_id, "amount": 100.0, "status": "PROCESSING"}
+        {
+            "id": payment_id,
+            "order_id": order_id,
+            "amount": 100.0,
+            "status": "PROCESSING",
+            "payment_simulate": None,
+        }
     ]
     pool = MockPool(payments=payments)
-    
+
     count = await reconcile_stuck_payments(pool)
-    
+
     assert count == 1
     assert len(pool.conn.updates) == 1
     # Check update query args: (new_status, payment_id)
     assert pool.conn.updates[0][0] == "SUCCEEDED"
     assert pool.conn.updates[0][1] == payment_id
-    
+
     assert len(pool.conn.inserts) == 1
     # Check insert query args: (topic, order_id, payload)
     assert pool.conn.inserts[0][0] == "payment.succeeded"
+    assert pool.conn.inserts[0][1] == order_id
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stuck_payment_honours_failure_directive():
+    """A payment that crashed mid-gateway must not resolve to SUCCEEDED.
+
+    Regression test: payment_simulate was previously not persisted, so
+    reconciliation passed None, fell back to PAYMENT_SIMULATE_DEFAULT
+    ("success"), and inverted the outcome of a deliberately-failing order.
+    """
+    payment_id = str(uuid.uuid4())
+    order_id = str(uuid.uuid4())
+    payments = [
+        {
+            "id": payment_id,
+            "order_id": order_id,
+            "amount": 100.0,
+            "status": "PROCESSING",
+            "payment_simulate": "failure",
+        }
+    ]
+    pool = MockPool(payments=payments)
+
+    count = await reconcile_stuck_payments(pool)
+
+    assert count == 1
+    assert pool.conn.updates[0][0] == "FAILED"
+    assert pool.conn.inserts[0][0] == "payment.failed"
     assert pool.conn.inserts[0][1] == order_id
 
 @pytest.mark.asyncio
@@ -104,7 +139,13 @@ async def test_reconcile_already_resolved():
             return await super().fetchval(query, *args)
             
     conn = RaceConditionConnection([
-        {"id": payment_id, "order_id": order_id, "amount": 100.0, "status": "PROCESSING"}
+        {
+            "id": payment_id,
+            "order_id": order_id,
+            "amount": 100.0,
+            "status": "PROCESSING",
+            "payment_simulate": None,
+        }
     ])
     
     class RaceConditionPool(MockPool):

@@ -1,8 +1,20 @@
 """Payment reconciliation worker.
 
-Periodically queries for payments stuck in PROCESSING state
-and resolves them by communicating with the gateway and
-publishing the appropriate outcome event.
+Periodically finds payments stuck in PROCESSING — rows where Transaction 1
+committed but Transaction 2 never ran, because the service died around the
+gateway call. Kafka cannot recover these: the offset is committed either way,
+and a redelivered message would short-circuit on the processed_events check.
+Database state is the only remaining signal, so this worker polls for it.
+
+Resolution re-derives the outcome from the payment_simulate directive persisted
+in Transaction 1. The simulated gateway is a pure function of that directive,
+so re-deriving is equivalent to querying it for the original result.
+
+A real implementation would NOT do this. It would look the charge up at the
+provider by payment_id, because a real gateway's outcome is not derivable —
+only it knows whether the money actually moved. That lookup also distinguishes
+PENDING (still in flight) and NOT_FOUND (never received) from a settled result,
+states this simulation has no need to represent.
 """
 
 import asyncio
@@ -26,9 +38,9 @@ async def reconcile_stuck_payments(db_pool: Pool, stuck_duration: str = "3 minut
         # 1. Find stuck payments
         stuck_payments = await conn.fetch(
             f"""
-            SELECT id, order_id, amount 
-            FROM payments 
-            WHERE status = 'PROCESSING' 
+            SELECT id, order_id, amount, payment_simulate
+            FROM payments
+            WHERE status = 'PROCESSING'
               AND updated_at < NOW() - INTERVAL '{stuck_duration}'
             """
         )
@@ -37,12 +49,13 @@ async def reconcile_stuck_payments(db_pool: Pool, stuck_duration: str = "3 minut
             payment_id = payment["id"]
             order_id = str(payment["order_id"])
             amount = payment["amount"]
-            
+            simulate_directive = payment["payment_simulate"]
+
             logger.info("reconciling_stuck_payment", payment_id=str(payment_id), order_id=order_id)
-            
-            # 2. Call gateway
-            # Since we lost the simulate directive in the DB, we pass None to use the default
-            success = await process_payment(amount, None)
+
+            # 2. Resolve the outcome using the directive persisted in Transaction 1,
+            #    so a crashed "failure" order does not resolve to SUCCEEDED.
+            success = await process_payment(amount, simulate_directive)
             
             new_status = "SUCCEEDED" if success else "FAILED"
             outbox_topic = "payment.succeeded" if success else "payment.failed"
